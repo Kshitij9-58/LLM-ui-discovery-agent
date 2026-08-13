@@ -119,11 +119,18 @@ override is needed.
 AUTOMATION`. `InterventionRequest` carries the goal/capability, step index, current URL, a
 screenshot, and the reason -- written to `/evidence/`.
 
-**The actual hand-off mechanism -- real, not mocked.** On escalation,
-`context.storage_state()` dumps the live browser context's cookies/localStorage to disk.
-That file *is* the live session for a cookie-authenticated app: whoever loads it next
-talks to the same authenticated server-side session, not a fresh login. The operator
-console loads exactly that file, drives the same session, performs manual steps, then
+**The actual hand-off mechanism -- real, not mocked, and verified end-to-end.** On
+escalation, `context.storage_state()` dumps the live browser context's cookies/localStorage
+to disk. That file *is* the live session for a cookie-authenticated app: whoever loads it
+next talks to the same authenticated server-side session, not a fresh login. This is proven
+by `tests/test_escalation_integration.py::test_operator_resumes_paused_session_without_fresh_login`,
+which runs the handoff across three genuinely separate Playwright browser instances (not
+just separate pages in one browser) to simulate a real process boundary: automation
+escalates and fully closes its browser; a fresh browser loads *only* the saved
+`storage_state` (no credentials, no `/login` call) and asserts it lands on the protected
+member page rather than a login form; the operator performs a manual action and hands
+back; a third fresh browser loads the updated state and confirms it's still authenticated.
+The operator console loads that file, drives the same session, performs manual steps, then
 `resolve_and_hand_back()` re-dumps `storage_state` (capturing anything the operator
 changed) and flips control to `RESUMING`. Automation polls `wait_for_resolution()` and
 resumes from that state.
@@ -165,10 +172,13 @@ The allowlist checks hostnames, not routes. Redaction is a backstop, not a guara
 
 ## 7. Cuts
 
-**Built and verified** (22 automated tests, including 5 integration tests against a live
-running instance of the mock app): the mock target app, artifact schema, guardrails,
-perception layer, shared executor, replay engine with the three-way outcome split and one
-concrete recovery policy, and the escalation state machine + session hand-off.
+**Built and verified** (25 automated tests, including 8 integration tests that drive a
+real headless browser against a live running instance of the mock app): the mock target
+app, artifact schema, guardrails, perception layer, shared executor, replay engine with
+the three-way outcome split and one concrete recovery policy, and the escalation state
+machine + session hand-off -- including the specific claim that a paused session resumes
+without a fresh login, proven across three separate browser instances simulating a real
+process boundary.
 
 **Built but not yet verified:** `agent/discovery.py`, the LLM loop and artifact
 distillation. It imports and type-checks cleanly but has not yet been run end-to-end

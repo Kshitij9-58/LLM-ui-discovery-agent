@@ -1,8 +1,8 @@
-# interface.ai Take-Home: Computer-Use Automation System
+# LLM UI Discovery Agent: Computer-Use Automation System
 
 ## What's actually here right now
 
-Built and verified working (22 automated tests passing against a live running
+Built and verified working (25 automated tests passing against a live running
 instance of the mock target app):
 
 - `mock_bank/app.py` — the target application: a deliberately old-school,
@@ -16,11 +16,11 @@ instance of the mock target app):
 - `agent/replay.py` — the deterministic replay engine (Section 3.3), including
   the business-outcome / recoverable / hard-failure classification.
 - `agent/escalation.py`, `agent/operator_console.py` — the human handoff
-  mechanism (Section 3.6), built on Playwright's `storage_state` so a paused
-  session can genuinely be picked up by an operator process.
+  mechanism (Section 3.6), verified end-to-end: a paused session resumes in a
+  genuinely separate browser instance with no fresh login required.
 - `main.py` — CLI entry point wiring the above together.
 - `tests/` — unit tests for guardrails/schema, plus integration tests for
-  replay that run against the live mock app.
+  replay and escalation/handoff that run against the live mock app.
 
 **Not yet run**: `agent/discovery.py`, the LLM-driven observe→decide→act loop
 (Section 3.1) and the artifact-distillation step (Section 3.2). It's written
@@ -55,7 +55,7 @@ pytest tests/test_guardrails.py tests/test_schema.py -v
 
 These don't need the mock app or any API key.
 
-## Running the full stack (mock app + replay integration tests)
+## Running the full stack (mock app + integration tests)
 
 In one terminal, start the mock bank app:
 
@@ -70,11 +70,13 @@ In a second terminal, with the venv activated:
 pytest tests/ -v
 ```
 
-This runs all 22 tests, including 5 integration tests that drive a real
-headless Chromium browser against the running mock app: happy-path replay,
-a business-outcome case (member not found), a recoverable-error case
-(injected transient failure that the engine detects and retries), a missing-
-parameter hard failure, and a guardrail block on an unapproved risky action.
+This runs all 25 tests: 12 guardrail/schema unit tests needing no server, 5
+replay integration tests, and 8 escalation/handoff integration tests, all
+driving a real headless Chromium browser against the running mock app. The
+escalation tests are worth calling out specifically: they run the pause →
+hand-off → resume cycle across three genuinely separate browser instances to
+prove a paused session resumes without a fresh login, not just that the code
+runs without throwing.
 
 ## Demo path: replay a saved artifact by hand
 
@@ -115,7 +117,7 @@ the same way as the hand-built example above.
 
 ## Project status / what's left
 
-See `REPORT.md` (not yet written) for the full design write-up. Immediate
-next steps: run a real discovery session, capture evidence, replay the
-resulting artifact including one error case, and write up the seven-section
-report the brief requires.
+See `REPORT.md` for the full design write-up. Immediate next steps: run a
+real discovery session, capture evidence, replay the resulting artifact
+including one error case (already demonstrated with the hand-built artifact
+above), and finalize the evidence folder.
