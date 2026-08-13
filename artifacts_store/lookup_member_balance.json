@@ -1,0 +1,170 @@
+{
+  "metadata": {
+    "artifact_id": "manual-test-1",
+    "name": "lookup_member_balance",
+    "version": "1.0.0",
+    "created_at": "2026-08-13T06:19:25.266720+00:00",
+    "surface": "cu-serv-mock-v1",
+    "tenant_scope": "base",
+    "discovery_goal": "look up member and read savings balance",
+    "approval_state": "approved",
+    "author": "llm-discovery-agent"
+  },
+  "inputs": [
+    {
+      "name": "member_id",
+      "type": "string",
+      "required": true,
+      "enum_values": null,
+      "description": "Member ID to look up",
+      "example": "12345"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "savings_balance",
+      "type": "string",
+      "description": "Savings balance as displayed"
+    }
+  ],
+  "entry_point": "http://127.0.0.1:5055/search",
+  "preconditions": [],
+  "steps": [
+    {
+      "index": 0,
+      "description": "Navigate to member search",
+      "action": {
+        "type": "navigate",
+        "target": null,
+        "value_template": "http://127.0.0.1:5055/search",
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": {
+        "type": "url_matches",
+        "expectation": "/search",
+        "target": null,
+        "frame": null
+      },
+      "risk": "safe"
+    },
+    {
+      "index": 1,
+      "description": "Fill 'Member ID'",
+      "action": {
+        "type": "fill",
+        "target": {
+          "primary": {
+            "strategy": "element_id",
+            "value": "fld_memberid",
+            "frame": null,
+            "description": "Member ID field"
+          },
+          "fallbacks": [
+            {
+              "strategy": "label_text",
+              "value": "Member ID",
+              "frame": null,
+              "description": "Member ID field by label"
+            }
+          ],
+          "robustness_note": "element id is stable for this legacy form; label text as fallback"
+        },
+        "value_template": "{member_id}",
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    },
+    {
+      "index": 2,
+      "description": "Click 'Look Up Member'",
+      "action": {
+        "type": "click",
+        "target": {
+          "primary": {
+            "strategy": "aria_role_name",
+            "value": "button::Look Up Member",
+            "frame": null,
+            "description": "search submit button"
+          },
+          "fallbacks": [
+            {
+              "strategy": "text_content",
+              "value": "Look Up Member",
+              "frame": null,
+              "description": "by text"
+            }
+          ],
+          "robustness_note": "role+name is stable for a submit button"
+        },
+        "value_template": null,
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": {
+        "type": "text_present",
+        "expectation": "Savings Balance",
+        "target": null,
+        "frame": null
+      },
+      "risk": "safe"
+    },
+    {
+      "index": 3,
+      "description": "Extract savings balance",
+      "action": {
+        "type": "extract",
+        "target": {
+          "primary": {
+            "strategy": "element_id",
+            "value": "fld_savings_balance",
+            "frame": null,
+            "description": "savings balance cell"
+          },
+          "fallbacks": [],
+          "robustness_note": "element id present on this table cell"
+        },
+        "value_template": null,
+        "extract_as": "savings_balance",
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    }
+  ],
+  "declared_outcomes": [
+    {
+      "name": "MEMBER_NOT_FOUND",
+      "category": "business_outcome",
+      "detection": {
+        "type": "text_present",
+        "expectation": "NOT FOUND",
+        "target": null,
+        "frame": null
+      },
+      "description": "no such member"
+    },
+    {
+      "name": "SYSTEM_BUSY",
+      "category": "recoverable",
+      "detection": {
+        "type": "text_present",
+        "expectation": "SYSTEM BUSY",
+        "target": null,
+        "frame": null
+      },
+      "description": "transient backend timeout"
+    }
+  ],
+  "success_checkpoint": {
+    "type": "text_present",
+    "expectation": "Savings Balance",
+    "target": null,
+    "frame": null
+  },
+  "allowlist_domains": [
+    "127.0.0.1"
+  ]
+}

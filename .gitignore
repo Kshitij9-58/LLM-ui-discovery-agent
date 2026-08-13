@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+venv/
+.venv/
+evidence/discovery/*.png
+evidence/replay/*.png
+evidence/interventions/
+*.egg-info/
