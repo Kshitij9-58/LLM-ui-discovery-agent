@@ -1,0 +1,220 @@
+{
+  "metadata": {
+    "artifact_id": "21a5319d-60e5-437c-a107-eb90b35b196f",
+    "name": "get_member_savings_balance",
+    "version": "1.0.0",
+    "created_at": "2026-08-16T23:30:29.329804+00:00",
+    "surface": "cu-serv-mock-v1",
+    "tenant_scope": "base",
+    "discovery_goal": "Look up member 12345 and read their current savings balance",
+    "approval_state": "draft",
+    "author": "llm-discovery-agent"
+  },
+  "inputs": [
+    {
+      "name": "member_id",
+      "type": "string",
+      "required": true,
+      "enum_values": null,
+      "description": "The unique identifier of the member to look up.",
+      "example": "12345"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "savings_balance",
+      "type": "number",
+      "description": "The current savings account balance for the specified member."
+    }
+  ],
+  "entry_point": "http://127.0.0.1:5055/search",
+  "preconditions": [
+    "Operator session must be authenticated (see login capability / precondition)."
+  ],
+  "steps": [
+    {
+      "index": 0,
+      "description": "Navigate to entry point http://127.0.0.1:5055/search",
+      "action": {
+        "type": "navigate",
+        "target": null,
+        "value_template": "http://127.0.0.1:5055/search",
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    },
+    {
+      "index": 1,
+      "description": "Fill 'Member ID'",
+      "action": {
+        "type": "fill",
+        "target": {
+          "primary": {
+            "strategy": "aria_role_name",
+            "value": "textbox::Member ID",
+            "frame": "main",
+            "description": "'Member ID' (textbox)"
+          },
+          "fallbacks": [
+            {
+              "strategy": "element_id",
+              "value": "fld_memberid",
+              "frame": "main",
+              "description": "by id fallback for 'Member ID'"
+            },
+            {
+              "strategy": "css_selector",
+              "value": "input#fld_memberid",
+              "frame": "main",
+              "description": "by structural css fallback for 'Member ID'"
+            }
+          ],
+          "robustness_note": "Primary keys on accessibility role+accessible-name, which survives layout/styling changes. Fallbacks degrade through element id, then visible text, then structural CSS position -- chosen so a change on one axis (e.g. relabeling) doesn't break all locators at once."
+        },
+        "value_template": "{member_id}",
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    },
+    {
+      "index": 2,
+      "description": "Click 'Look Up Member'",
+      "action": {
+        "type": "click",
+        "target": {
+          "primary": {
+            "strategy": "aria_role_name",
+            "value": "button::Look Up Member",
+            "frame": "main",
+            "description": "'Look Up Member' (button)"
+          },
+          "fallbacks": [
+            {
+              "strategy": "css_selector",
+              "value": "input[name=\"do_search\"]",
+              "frame": "main",
+              "description": "by structural css fallback for 'Look Up Member'"
+            }
+          ],
+          "robustness_note": "Primary keys on accessibility role+accessible-name, which survives layout/styling changes. Fallbacks degrade through element id, then visible text, then structural CSS position -- chosen so a change on one axis (e.g. relabeling) doesn't break all locators at once."
+        },
+        "value_template": null,
+        "extract_as": null,
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    },
+    {
+      "index": 3,
+      "description": "Extract 'savings_balance'",
+      "action": {
+        "type": "extract",
+        "target": {
+          "primary": {
+            "strategy": "aria_role_name",
+            "value": "text::Savings Balance",
+            "frame": "main",
+            "description": "'Savings Balance' (text)"
+          },
+          "fallbacks": [
+            {
+              "strategy": "element_id",
+              "value": "fld_savings_balance",
+              "frame": "main",
+              "description": "by id fallback for 'Savings Balance'"
+            },
+            {
+              "strategy": "text_content",
+              "value": "$4821.63",
+              "frame": "main",
+              "description": "by text fallback for 'Savings Balance'"
+            },
+            {
+              "strategy": "css_selector",
+              "value": "td#fld_savings_balance",
+              "frame": "main",
+              "description": "by structural css fallback for 'Savings Balance'"
+            }
+          ],
+          "robustness_note": "Primary keys on accessibility role+accessible-name, which survives layout/styling changes. Fallbacks degrade through element id, then visible text, then structural CSS position -- chosen so a change on one axis (e.g. relabeling) doesn't break all locators at once."
+        },
+        "value_template": null,
+        "extract_as": "savings_balance",
+        "timeout_ms": 8000
+      },
+      "checkpoint": null,
+      "risk": "safe"
+    }
+  ],
+  "declared_outcomes": [
+    {
+      "name": "MEMBER_NOT_FOUND",
+      "category": "business_outcome",
+      "detection": {
+        "type": "text_present",
+        "expectation": "NOT FOUND",
+        "target": null,
+        "frame": null
+      },
+      "description": "The supplied member ID does not exist in the system."
+    },
+    {
+      "name": "VALIDATION_ERROR",
+      "category": "business_outcome",
+      "detection": {
+        "type": "text_present",
+        "expectation": "VALIDATION ERROR",
+        "target": null,
+        "frame": null
+      },
+      "description": "One or more supplied input values failed server-side validation."
+    },
+    {
+      "name": "PERMISSION_DENIED",
+      "category": "business_outcome",
+      "detection": {
+        "type": "text_present",
+        "expectation": "PERMISSION DENIED",
+        "target": null,
+        "frame": null
+      },
+      "description": "The target member/account is restricted (e.g. frozen) and the action is not permitted."
+    },
+    {
+      "name": "SESSION_TIMEOUT",
+      "category": "recoverable",
+      "detection": {
+        "type": "text_present",
+        "expectation": "SESSION TIMEOUT",
+        "target": null,
+        "frame": null
+      },
+      "description": "The operator session expired mid-flow; replay should re-authenticate and retry once."
+    },
+    {
+      "name": "SYSTEM_BUSY",
+      "category": "recoverable",
+      "detection": {
+        "type": "text_present",
+        "expectation": "SYSTEM BUSY",
+        "target": null,
+        "frame": null
+      },
+      "description": "A transient backend timeout; replay should retry with backoff before failing hard."
+    }
+  ],
+  "success_checkpoint": {
+    "type": "text_present",
+    "expectation": "Savings Balance",
+    "target": null,
+    "frame": null
+  },
+  "allowlist_domains": [
+    "127.0.0.1"
+  ]
+}

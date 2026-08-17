@@ -1,0 +1,15 @@
+{
+  "status": "success",
+  "artifact_id": "21a5319d-60e5-437c-a107-eb90b35b196f",
+  "artifact_version": "1.0.0",
+  "outputs": {
+    "savings_balance": "$250.00"
+  },
+  "outcome_name": null,
+  "failed_step_index": null,
+  "error_detail": null,
+  "escalation_id": null,
+  "started_at": "2026-08-16T23:32:32.079503+00:00",
+  "finished_at": "2026-08-16T23:32:32.409484+00:00",
+  "evidence_dir": null
+}

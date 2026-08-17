@@ -21,11 +21,12 @@ purpose:
      the LLM is asked to name stable parameters, choose locator fallbacks, and
      write robustness notes, not just log what it clicked.
 
-The loop uses Claude's tool-calling: at each step the model sees a text
-rendering of the current accessibility-tree observation and must call exactly
-one tool representing the next action (or a "goal_complete" / "stuck" tool to
-end the loop). This keeps the model's action space closed and auditable instead
-of parsing prose for what it "meant."
+The loop uses Gemini's function-calling (manual, automatic function calling
+disabled): at each step the model sees a text rendering of the current
+accessibility-tree observation and must return exactly one function call
+representing the next action (or a "goal_complete" / "stuck" call to end the
+loop). This keeps the model's action space closed and auditable instead of
+parsing prose for what it "meant."
 """
 from __future__ import annotations
 
@@ -37,7 +38,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from playwright.sync_api import Page
-from anthropic import Anthropic
+from google import genai
+from google.genai import types as gtypes
+from google.genai import errors as gerrors
 
 from agent.schema import (
     Action, ActionType, TargetElement, Locator, LocatorStrategy,
@@ -48,8 +51,32 @@ from agent.perception import observe
 from agent.executor import ActionExecutor, GuardrailBlocked, ElementNotResolved
 from agent.guardrails import AllowlistPolicy, RiskGate, classify_risk, redact
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "gemini-flash-latest"
 MAX_STEPS = 25
+
+# Gemini's hosted models -- especially newly-launched ones -- routinely return
+# 503 UNAVAILABLE under "high demand" even when the request itself is well-formed;
+# this is server-side capacity, not a caller error, and is documented by Google as
+# "usually temporary." A bare call-and-fail would make the whole discovery run
+# fragile against something that has nothing to do with our code's correctness, so
+# every generate_content call goes through this small bounded retry with backoff
+# rather than propagating the first transient 503.
+_MAX_LLM_RETRIES = 5
+_BACKOFF_BASE_SECONDS = 3
+
+
+def _generate_with_retry(client: genai.Client, **kwargs):
+    last_err = None
+    for attempt in range(_MAX_LLM_RETRIES):
+        try:
+            return client.models.generate_content(**kwargs)
+        except gerrors.ServerError as e:
+            last_err = e
+            wait = _BACKOFF_BASE_SECONDS * (2 ** attempt)
+            print(f"  [Gemini API busy (attempt {attempt + 1}/{_MAX_LLM_RETRIES}), "
+                  f"retrying in {wait}s...] {e}")
+            time.sleep(wait)
+    raise last_err
 
 SYSTEM_PROMPT = """You are a careful back-office banking operator's assistant. You are driving a REAL legacy \
 banking console via a browser to accomplish a stated goal. This is a mock/test system with fake data \
@@ -57,10 +84,10 @@ banking console via a browser to accomplish a stated goal. This is a mock/test s
 verifying results, and never guessing at values you have not observed.
 
 Rules:
-- You act ONLY through the provided tools. Never assume an action succeeded -- the next observation tells you.
+- You act ONLY through the provided function calls. Never assume an action succeeded -- the next observation tells you.
 - The UI is old and table/frame-based. Read the "Visible interactive elements" list and the page text \
 carefully; elements are numbered ONLY for your reference in reasoning, you must refer to them by their \
-accessible name / role / text when calling a tool, not by number.
+accessible name / role / text when calling a function, not by number.
 - Before any action that creates, changes, or closes an account or moves money, you MUST explicitly state \
 in your reasoning that you intend to perform that specific risky action and why it is necessary for the goal. \
 The system will not execute a risky action without that explicit statement.
@@ -71,13 +98,14 @@ rather than flailing at the UI.
 rather than guessing.
 - Call report_goal_complete only once you have OBSERVED (in the current page text/elements, not from memory) \
 clear evidence the goal was achieved.
+- On every turn, call EXACTLY ONE function. Always include a "reasoning" argument explaining your choice.
 """
 
-TOOLS = [
+_TOOL_SCHEMAS = [
     {
         "name": "navigate",
         "description": "Go to a URL directly.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {"url": {"type": "string"}, "reasoning": {"type": "string"}},
             "required": ["url", "reasoning"],
@@ -86,7 +114,7 @@ TOOLS = [
     {
         "name": "click",
         "description": "Click an interactive element, identified by its accessible role and name (or visible text) as shown in the observation.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "accessible_name_or_text": {"type": "string", "description": "The exact name/text of the element to click, as shown in the observation."},
@@ -100,7 +128,7 @@ TOOLS = [
     {
         "name": "fill",
         "description": "Type a value into a text/password input field.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "accessible_name_or_text": {"type": "string"},
@@ -116,7 +144,7 @@ TOOLS = [
     {
         "name": "select_option",
         "description": "Choose an option in a <select> dropdown.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "accessible_name_or_text": {"type": "string"},
@@ -130,7 +158,7 @@ TOOLS = [
     {
         "name": "extract_text",
         "description": "Read the text of an element on the page (e.g. a balance) to use as an output value.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "accessible_name_or_text": {"type": "string", "description": "Text near/on the element, or a distinctive nearby label, to locate it."},
@@ -144,7 +172,7 @@ TOOLS = [
     {
         "name": "report_goal_complete",
         "description": "Call this once you have observed clear evidence the stated goal has been achieved.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "summary": {"type": "string"},
@@ -156,7 +184,7 @@ TOOLS = [
     {
         "name": "report_business_outcome",
         "description": "Call this if the app returned a legitimate non-success result (not found, validation error, permission denied) that means the goal cannot proceed further, but this is a normal/expected outcome, not a system failure.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {
                 "outcome_name": {"type": "string", "description": "SCREAMING_SNAKE_CASE short name, e.g. MEMBER_NOT_FOUND."},
@@ -168,13 +196,24 @@ TOOLS = [
     {
         "name": "request_human_escalation",
         "description": "Call this if you are stuck and cannot safely proceed on your own.",
-        "input_schema": {
+        "parameters_json_schema": {
             "type": "object",
             "properties": {"reason": {"type": "string"}},
             "required": ["reason"],
         },
     },
 ]
+
+_FUNCTION_DECLARATIONS = [gtypes.FunctionDeclaration(**spec) for spec in _TOOL_SCHEMAS]
+_TOOL = gtypes.Tool(function_declarations=_FUNCTION_DECLARATIONS)
+_GEN_CONFIG = gtypes.GenerateContentConfig(
+    system_instruction=SYSTEM_PROMPT,
+    tools=[_TOOL],
+    automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
+    tool_config=gtypes.ToolConfig(
+        function_calling_config=gtypes.FunctionCallingConfig(mode="ANY")
+    ),
+)
 
 
 @dataclass
@@ -254,7 +293,7 @@ class DiscoveryAgent:
         self.allowlist = allowlist
         self.risk_gate = RiskGate(mode="discovery")
         self.executor = ActionExecutor(page, allowlist, self.risk_gate)
-        self.client = Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+        self.client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         self.extracted_outputs: dict[str, str] = {}
         self.recorded_steps: list[dict] = []  # raw dicts, converted to Step objects at distillation time
 
@@ -271,49 +310,58 @@ class DiscoveryAgent:
             "risk": "safe",
         })
 
-        messages = [{
-            "role": "user",
-            "content": f"GOAL: {goal}\n\nYou are starting at {entry_url}. Here is the current page state:\n\n{observe(self.page).to_llm_text()}",
-        }]
+        # Gemini's `contents` list plays the same role as a running chat history:
+        # a turn-by-turn record the model conditions on each call.
+        contents: list[gtypes.Content] = [
+            gtypes.Content(
+                role="user",
+                parts=[gtypes.Part.from_text(
+                    text=f"GOAL: {goal}\n\nYou are starting at {entry_url}. Here is the current page state:\n\n{observe(self.page).to_llm_text()}"
+                )],
+            )
+        ]
 
         transcript: list[TranscriptEntry] = []
         screenshots: list[str] = []
 
         for step_num in range(1, MAX_STEPS + 1):
-            resp = self.client.messages.create(
+            resp = _generate_with_retry(
+                self.client,
                 model=MODEL,
-                max_tokens=1500,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
+                contents=contents,
+                config=_GEN_CONFIG,
             )
 
-            text_blocks = [b.text for b in resp.content if b.type == "text"]
-            reasoning = " ".join(text_blocks)
-            tool_blocks = [b for b in resp.content if b.type == "tool_use"]
-
-            if not tool_blocks:
+            function_calls = resp.function_calls or []
+            if not function_calls:
                 # model produced only text -- nudge it to act
-                messages.append({"role": "assistant", "content": resp.content})
-                messages.append({"role": "user", "content": "Please proceed by calling exactly one tool."})
+                model_content = resp.candidates[0].content if resp.candidates else None
+                if model_content:
+                    contents.append(model_content)
+                contents.append(gtypes.Content(
+                    role="user",
+                    parts=[gtypes.Part.from_text(text="Please proceed by calling exactly one function.")],
+                ))
                 continue
 
-            tool_call = tool_blocks[0]
-            messages.append({"role": "assistant", "content": resp.content})
+            call = function_calls[0]
+            reasoning = call.args.get("reasoning", "") if call.args else ""
+            model_content = resp.candidates[0].content  # the Content containing the function_call part(s)
+            contents.append(model_content)
 
             tool_result_text = ""
             success = True
             terminal_status = None
 
             try:
-                if tool_call.name == "report_goal_complete":
+                if call.name == "report_goal_complete":
                     terminal_status = "success"
-                elif tool_call.name == "report_business_outcome":
+                elif call.name == "report_business_outcome":
                     terminal_status = "business_outcome"
-                elif tool_call.name == "request_human_escalation":
+                elif call.name == "request_human_escalation":
                     terminal_status = "escalated"
                 else:
-                    tool_result_text = self._execute_tool(tool_call, step_num)
+                    tool_result_text = self._execute_tool(call, step_num)
             except (GuardrailBlocked, ElementNotResolved) as e:
                 success = False
                 tool_result_text = f"ERROR: {e}"
@@ -334,9 +382,9 @@ class DiscoveryAgent:
                 step=step_num,
                 observation_text=obs_text,
                 llm_reasoning=reasoning,
-                tool_name=tool_call.name,
-                tool_input=tool_call.input,
-                execution_detail=tool_result_text or (json.dumps(tool_call.input)),
+                tool_name=call.name,
+                tool_input=dict(call.args) if call.args else {},
+                execution_detail=tool_result_text or json.dumps(dict(call.args) if call.args else {}),
                 success=success,
             ))
 
@@ -346,24 +394,28 @@ class DiscoveryAgent:
                                         outputs=dict(self.extracted_outputs), artifact=artifact, screenshots=screenshots)
             if terminal_status == "business_outcome":
                 return DiscoveryResult(goal=goal, status="business_outcome", transcript=transcript,
-                                        outcome_name=tool_call.input.get("outcome_name"),
+                                        outcome_name=call.args.get("outcome_name") if call.args else None,
                                         outputs=dict(self.extracted_outputs), screenshots=screenshots)
             if terminal_status == "escalated":
                 return DiscoveryResult(goal=goal, status="escalated", transcript=transcript, screenshots=screenshots)
 
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": tool_call.id, "content": tool_result_text or "ok"},
-                    {"type": "text", "text": f"Current page state:\n\n{obs_text}"},
-                ],
-            })
+            # feed the function's result back as the next turn, Gemini-style:
+            # a Content(role="user") wrapping a Part.from_function_response.
+            function_response_part = gtypes.Part.from_function_response(
+                name=call.name,
+                response={"result": tool_result_text or "ok"},
+            )
+            contents.append(gtypes.Content(role="user", parts=[function_response_part]))
+            contents.append(gtypes.Content(
+                role="user",
+                parts=[gtypes.Part.from_text(text=f"Current page state:\n\n{obs_text}")],
+            ))
 
         return DiscoveryResult(goal=goal, status="hard_failure", transcript=transcript, screenshots=screenshots)
 
-    def _execute_tool(self, tool_call, step_num: int) -> str:
-        name = tool_call.name
-        inp = tool_call.input
+    def _execute_tool(self, call, step_num: int) -> str:
+        name = call.name
+        inp = dict(call.args) if call.args else {}
         reasoning = inp.get("reasoning", "")
 
         if name == "navigate":
@@ -417,8 +469,14 @@ class DiscoveryAgent:
             entry, value = self.executor.execute(action, step_index=step_num, description=f"extract '{inp['output_name']}'",
                                                   risk="safe", risk_confirmed=True)
             self.extracted_outputs[inp["output_name"]] = value
+            # Keep the actual on-page label text (what the LLM matched against,
+            # e.g. "Savings Balance") separately from the output field's snake_case
+            # name (e.g. "savings_balance"). The label is what's really present on
+            # the page and is what a checkpoint needs to assert; the field name is
+            # an internal identifier that never appears in the rendered UI.
             self.recorded_steps.append({"description": f"Extract '{inp['output_name']}'", "action": action,
-                                         "resolved_value": None, "risk": "safe", "extract_as": inp["output_name"]})
+                                         "resolved_value": None, "risk": "safe", "extract_as": inp["output_name"],
+                                         "on_page_label": inp["accessible_name_or_text"]})
             return f"extracted: {redact(value)}"
 
         raise ValueError(f"Unknown tool {name}")
@@ -437,40 +495,64 @@ class DiscoveryAgent:
         ]
         extract_fields = [s["extract_as"] for s in self.recorded_steps if s.get("extract_as")]
 
+        # Index fill/select candidates by a stable integer id rather than by their
+        # free-text description. Matching on description text requires the LLM to
+        # echo that exact string back verbatim in its JSON response -- any deviation
+        # (paraphrasing, punctuation, capitalization) breaks the lookup silently,
+        # which is exactly what happened here: the parameter got IDENTIFIED as
+        # member_id in artifact.inputs, but the fill step's value_template still got
+        # the hardcoded literal instead of "{member_id}", because the description
+        # string round-trip didn't match. A numeric id has no such failure mode.
+        for idx, s in enumerate(fill_candidates):
+            s["_candidate_id"] = idx
+
         param_prompt = (
             f"You just successfully completed this goal via browser automation: \"{goal}\"\n\n"
             f"Here are the values you typed/selected during the run that could plausibly be caller-supplied "
-            f"parameters on future invocations (rather than fixed constants):\n"
-            + "\n".join(f"- {s['description']}: value=\"{s['resolved_value']}\"" for s in fill_candidates)
+            f"parameters on future invocations (rather than fixed constants). Each is labeled with a candidate_id:\n"
+            + "\n".join(f"- candidate_id={s['_candidate_id']}: {s['description']}: value=\"{s['resolved_value']}\"" for s in fill_candidates)
             + f"\n\nAnd here are the values you extracted as outputs: {extract_fields}\n\n"
             "Respond ONLY with JSON (no prose, no markdown fences) in this exact shape:\n"
-            '{"inputs": [{"step_description": "...", "param_name": "member_id", "type": "string", '
+            '{"inputs": [{"candidate_id": 0, "param_name": "member_id", "type": "string", '
             '"description": "...", "example": "..."}], '
             '"outputs": [{"field_name": "savings_balance", "type": "number", "description": "..."}], '
             '"capability_name": "short_snake_case_name"}\n'
-            "Only include a step as an input parameter if its value plausibly varies per call (e.g. a member ID, "
+            "Use the EXACT integer candidate_id shown above, not the step description text. "
+            "Only include a candidate as an input parameter if its value plausibly varies per call (e.g. a member ID, "
             "an amount) -- not if it's a fixed UI choice unlikely to vary (e.g. always the same button). "
             "Match output field_name values to the extracted output names given above."
         )
-        resp = self.client.messages.create(
-            model=MODEL, max_tokens=1000,
-            messages=[{"role": "user", "content": param_prompt}],
+        resp = _generate_with_retry(
+            self.client,
+            model=MODEL,
+            contents=param_prompt,
+            config=gtypes.GenerateContentConfig(response_mime_type="application/json"),
         )
-        raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+        raw = (resp.text or "").strip()
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             parsed = {"inputs": [], "outputs": [], "capability_name": "discovered_capability"}
 
-        param_by_step_desc = {p["step_description"]: p for p in parsed.get("inputs", [])}
+        # map candidate_id -> the actual recorded_steps entry it refers to, so we can
+        # match on object identity/description text reliably during the steps build below
+        candidate_by_id = {s["_candidate_id"]: s for s in fill_candidates}
+        param_by_candidate_id = {p["candidate_id"]: p for p in parsed.get("inputs", []) if "candidate_id" in p}
+        # build the final lookup keyed by the SAME dict object identity (id()) so we
+        # never depend on description-text matching at all
+        param_by_step_obj_id = {}
+        for cid, param in param_by_candidate_id.items():
+            step_obj = candidate_by_id.get(cid)
+            if step_obj is not None:
+                param_by_step_obj_id[id(step_obj)] = param
 
         steps: list[Step] = []
         for i, s in enumerate(self.recorded_steps):
             action: Action = s["action"]
             value_template = None
             if s.get("resolved_value") is not None:
-                match = param_by_step_desc.get(s["description"])
+                match = param_by_step_obj_id.get(id(s))
                 value_template = f"{{{match['param_name']}}}" if match else s["resolved_value"]
 
             new_action = Action(
@@ -478,10 +560,6 @@ class DiscoveryAgent:
                 extract_as=s.get("extract_as"), timeout_ms=action.timeout_ms,
             )
             checkpoint = None
-            if action.type in (ActionType.NAVIGATE, ActionType.CLICK):
-                # heuristic checkpoint: after navigation/click, next observation's URL is a decent
-                # default checkpoint; refined below for the final step using success_checkpoint.
-                checkpoint = None
             steps.append(Step(
                 index=i, description=s["description"], action=new_action,
                 checkpoint=checkpoint, risk=s.get("risk", "safe"),
@@ -502,12 +580,22 @@ class DiscoveryAgent:
             type=CheckpointType.URL_MATCHES,
             expectation=final_url.split("://", 1)[-1].split("/", 1)[-1].split("?")[0].rsplit("/", 1)[0] or "/",
         )
-        # prefer a text-based checkpoint using the LLM's own stated success evidence if available
-        last_entry = transcript[-1] if transcript else None
-        if last_entry and last_entry.tool_name == "report_goal_complete":
-            evidence = last_entry.tool_input.get("evidence", "")
-            if evidence:
-                success_checkpoint = Checkpoint(type=CheckpointType.TEXT_PRESENT, expectation=evidence[:80])
+        # Prefer a checkpoint anchored to something goal-invariant rather than a
+        # specific run's narrative. The LLM's free-text "evidence" string
+        # (e.g. "the Savings Balance is displayed as $4821.63") is specific to
+        # THIS invocation's member and would never match again for a different
+        # member_id -- using it verbatim as a literal text-match, as an earlier
+        # version of this method did, breaks the checkpoint on every replay with
+        # different inputs. Instead, if the run extracted at least one output,
+        # anchor the checkpoint to that output's LABEL (the stable text next to
+        # the value, not the value itself) -- e.g. "Savings Balance" is present
+        # on the page regardless of which member's balance it is.
+        if extract_fields:
+            extract_steps = [s for s in self.recorded_steps if s.get("extract_as")]
+            if extract_steps:
+                first_label = extract_steps[0].get("on_page_label")
+                if first_label:
+                    success_checkpoint = Checkpoint(type=CheckpointType.TEXT_PRESENT, expectation=first_label)
 
         declared_outcomes = [
             DeclaredOutcome(

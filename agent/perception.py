@@ -100,6 +100,11 @@ def _extract_frame(frame: Frame, frame_name: str) -> list[ElementInfo]:
                 }
                 const parentLabel = el.closest('label');
                 if (parentLabel) return parentLabel.innerText.trim();
+                // legacy pattern: a <td id="..."> data cell whose preceding sibling
+                // cell in the same row is its label, e.g. <td>Savings Balance</td><td id="...">$4821.63</td>
+                if (el.tagName === 'TD' && el.previousElementSibling && el.previousElementSibling.tagName === 'TD') {
+                  return el.previousElementSibling.innerText.trim();
+                }
                 if (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
                   // legacy pattern: preceding table cell as an implicit label
                   const td = el.closest('td');
@@ -140,16 +145,28 @@ def _extract_frame(frame: Frame, frame_name: str) -> list[ElementInfo]:
                 return tag;
               }
               const nodes = Array.from(document.querySelectorAll('a,button,input,select,textarea'));
-              return nodes.map(el => {
+              // Data cells: legacy apps commonly render read-only values (balances, IDs,
+              // statuses) as plain table cells with a stable id and no interactive role
+              // at all. These aren't "interactive elements" but they ARE the extraction
+              // targets a capability needs to read -- treat an id-bearing <td>/<span> as
+              // a 'text' role element so the perception layer surfaces it the same way
+              // it surfaces a button or input, with its accessible name coming from the
+              // preceding label cell just like a form field would.
+              const dataCells = Array.from(document.querySelectorAll('td[id], span[id]'))
+                .filter(el => !el.querySelector('a,button,input,select,textarea')); // skip cells that just wrap a control
+              const allNodes = nodes.concat(dataCells);
+              return allNodes.map(el => {
                 const rect = el.getBoundingClientRect();
                 const visible = !!(rect.width || rect.height) && getComputedStyle(el).visibility !== 'hidden';
                 let cssPath = el.tagName.toLowerCase();
                 if (el.id) cssPath += '#' + el.id;
                 else if (el.name) cssPath += `[name="${el.name}"]`;
+                const isDataCell = el.tagName === 'TD' || el.tagName === 'SPAN';
+                const isPlainControl = !isDataCell;
                 return {
                   tag: el.tagName.toLowerCase(),
-                  role: el.getAttribute('role') || implicitRole(el),
-                  name: accessibleName(el),
+                  role: isDataCell ? 'text' : (el.getAttribute('role') || implicitRole(el)),
+                  name: isDataCell ? accessibleName(el) : accessibleName(el),
                   id: el.id || null,
                   cssPath: cssPath,
                   text: (el.innerText || el.value || '').trim(),

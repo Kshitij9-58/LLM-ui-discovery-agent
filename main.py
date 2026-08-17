@@ -102,7 +102,11 @@ def cmd_replay(args):
     with open(args.artifact_path) as f:
         artifact = CapabilityArtifact.model_validate_json(f.read())
 
-    params = json.loads(args.params) if args.params else {}
+    if args.params_file:
+        with open(args.params_file) as f:
+            params = json.load(f)
+    else:
+        params = json.loads(args.params) if args.params else {}
 
     if args.inject_error == "search_busy":
         requests.post("http://127.0.0.1:5055/admin/inject/search_busy")
@@ -169,6 +173,7 @@ def main():
     p_replay = sub.add_parser("replay", help="Deterministically replay a saved artifact")
     p_replay.add_argument("artifact_path")
     p_replay.add_argument("--params", default="{}")
+    p_replay.add_argument("--params-file", default=None, help="Path to a JSON file with input params (avoids shell quoting issues on Windows)")
     p_replay.add_argument("--approved", action="store_true", help="Treat artifact as approved (allows risky steps to run unattended)")
     p_replay.add_argument("--inject-error", choices=["search_busy"], default=None)
     p_replay.set_defaults(func=cmd_replay)

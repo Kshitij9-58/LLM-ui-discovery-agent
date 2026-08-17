@@ -172,18 +172,30 @@ The allowlist checks hostnames, not routes. Redaction is a backstop, not a guara
 
 ## 7. Cuts
 
-**Built and verified** (25 automated tests, including 8 integration tests that drive a
-real headless browser against a live running instance of the mock app): the mock target
-app, artifact schema, guardrails, perception layer, shared executor, replay engine with
-the three-way outcome split and one concrete recovery policy, and the escalation state
-machine + session hand-off -- including the specific claim that a paused session resumes
-without a fresh login, proven across three separate browser instances simulating a real
-process boundary.
+**Built and verified end-to-end**, including a genuine LLM-driven discovery run (Gemini
+2.x, via `google-genai`) against the live mock app, not just a description of one: 28
+automated tests, including 8 integration tests driving a real headless browser and one
+regression suite locking in a discovery-time bug fix (below). The discovered artifact
+(`artifacts_store/get_member_savings_balance.json`) was replayed deterministically against
+two different member IDs with correct, distinct outputs both times ($4,821.63 for member
+12345, $250.00 for member 67890) and no LLM involved in either replay.
 
-**Built but not yet verified:** `agent/discovery.py`, the LLM loop and artifact
-distillation. It imports and type-checks cleanly but has not yet been run end-to-end
-against a real model -- that's the immediate next step, and per the brief it's the one
-piece that has to be real rather than described.
+**Two real bugs the discovery run surfaced, both fixed and covered by tests:**
+1. *Perception only exposed interactive elements.* The first live run correctly filled
+   and submitted the search form, but couldn't extract the balance -- it's rendered in a
+   plain `<td>`, not a button/input/link, so it was invisible to the perception layer. The
+   model recovered by reading the value out of raw page text and reporting it in prose,
+   but that value never became a structured output. Fixed by extending `perception.py` to
+   also surface id-bearing table cells as labeled, extractable elements.
+2. *Parameter templating matched on free-text, and silently failed.* The distillation
+   step asked the LLM to echo back which step it typed a value into, matched by comparing
+   description strings verbatim. In the real run the LLM's response didn't reproduce that
+   text exactly, the match silently failed, and the resulting artifact had member 12345's
+   ID hardcoded into what was supposed to be a reusable capability -- replaying it against
+   a different member still returned the original member's balance. Fixed by matching on a
+   stable integer id instead of free text; `tests/test_discovery_distillation.py` locks
+   this in with mocked LLM responses, including one that deliberately paraphrases to prove
+   the match no longer depends on exact wording.
 
 **Deliberately not built:** a tenant-override resolution mechanism in `replay.py` (no
 second real tenant's UI to validate it against -- the design is stated in Section 4, but
@@ -192,8 +204,10 @@ real-time operator console (explicitly out of scope); desktop-surface support (a
 scope); an agent-facing capability catalog (optional stretch goal, skipped in favor of
 making the five core requirements each genuinely real).
 
-**Next, in order:** (1) run and verify real discovery, (2) route-level extension to the
-allowlist, (3) a concrete tenant-override mechanism validated against a second,
-deliberately-varied instance of the mock app, (4) multi-run stability (replay N times,
-report a flakiness signal) -- cheapest stretch goal given the replay engine already
-returns a structured result per run.
+**Next, in order:** (1) route-level extension to the allowlist, (2) a concrete
+tenant-override mechanism validated against a second, deliberately-varied instance of the
+mock app, (3) multi-run stability (replay N times, report a flakiness signal) -- cheapest
+stretch goal given the replay engine already returns a structured result per run, (4) a
+second discovery goal exercising the risky-action path (opening a sub-account) end-to-end
+with the LLM, to get discovery-time coverage of the risk-confirmation gate alongside the
+hand-built artifact that already covers it on the replay side.
