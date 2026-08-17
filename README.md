@@ -38,8 +38,8 @@ either replay.
 
 ```bash
 # 1. clone and enter the repo
-git clone <repo-url>
-cd interfaceai-takehome
+git clone https://github.com/Kshitij9-58/LLM-ui-discovery-agent.git
+cd LLM-ui-discovery-agent
 
 # 2. create a virtual environment (recommended)
 python3 -m venv venv
