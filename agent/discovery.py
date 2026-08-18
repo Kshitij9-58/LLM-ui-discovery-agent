@@ -51,7 +51,7 @@ from agent.perception import observe
 from agent.executor import ActionExecutor, GuardrailBlocked, ElementNotResolved
 from agent.guardrails import AllowlistPolicy, RiskGate, classify_risk, redact
 
-MODEL = "gemini-flash-latest"
+MODEL = "gemini-3.5-flash-lite"
 MAX_STEPS = 25
 
 # Gemini's hosted models -- especially newly-launched ones -- routinely return
@@ -61,8 +61,35 @@ MAX_STEPS = 25
 # fragile against something that has nothing to do with our code's correctness, so
 # every generate_content call goes through this small bounded retry with backoff
 # rather than propagating the first transient 503.
+#
+# Free-tier keys also hit 429 RESOURCE_EXHAUSTED on a strict per-minute quota
+# (as low as 5 requests/minute observed on some models) -- this is a DIFFERENT
+# failure mode from a 503: retrying quickly into the same quota window just
+# fails again immediately, so a 429 needs to wait out (most of) the quota
+# window, not a short exponential backoff. Google's error response includes a
+# retryDelay hint; honor it when present, with a floor long enough to actually
+# clear a per-minute window.
 _MAX_LLM_RETRIES = 5
 _BACKOFF_BASE_SECONDS = 3
+_QUOTA_RETRY_FLOOR_SECONDS = 20
+
+
+def _extract_retry_delay_seconds(error: gerrors.ClientError) -> Optional[float]:
+    """Pull the server-suggested retryDelay (e.g. '7.4s') out of a 429's error
+    body, if present, so we wait at least that long rather than guessing.
+    error.details is already the unwrapped inner error dict (google-genai's
+    APIError.__init__ sets self.details = response_json, and response_json by
+    that point is response.body_segments[0]['error'] -- not {'error': {...}})."""
+    try:
+        details = error.details.get("details", [])
+        for d in details:
+            if d.get("@type", "").endswith("RetryInfo"):
+                raw = d.get("retryDelay", "")
+                if raw.endswith("s"):
+                    return float(raw[:-1])
+    except Exception:
+        pass
+    return None
 
 
 def _generate_with_retry(client: genai.Client, **kwargs):
@@ -75,6 +102,19 @@ def _generate_with_retry(client: genai.Client, **kwargs):
             wait = _BACKOFF_BASE_SECONDS * (2 ** attempt)
             print(f"  [Gemini API busy (attempt {attempt + 1}/{_MAX_LLM_RETRIES}), "
                   f"retrying in {wait}s...] {e}")
+            time.sleep(wait)
+        except gerrors.ClientError as e:
+            # Only worth retrying a 429 (rate/quota limit) -- any other 4xx
+            # (bad request, auth failure, model not found) will never succeed
+            # on retry and should surface immediately rather than burn the
+            # retry budget waiting on something that can't self-resolve.
+            if getattr(e, "code", None) != 429:
+                raise
+            last_err = e
+            suggested = _extract_retry_delay_seconds(e)
+            wait = max(suggested or 0, _QUOTA_RETRY_FLOOR_SECONDS)
+            print(f"  [Gemini API rate/quota limited (attempt {attempt + 1}/{_MAX_LLM_RETRIES}), "
+                  f"waiting {wait:.0f}s for the quota window to clear...] {e}")
             time.sleep(wait)
     raise last_err
 

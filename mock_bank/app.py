@@ -27,6 +27,40 @@ app = Flask(__name__)
 app.secret_key = "dev-only-not-a-real-secret"
 
 # ---------------------------------------------------------------------------
+# Tenant configuration
+# ---------------------------------------------------------------------------
+# Multi-tenant stand-in: the SAME vendor product (this one codebase, same
+# routes, same business logic) rendered differently per tenant, exactly the
+# "hundreds of tenants running the same underlying vendor product configured,
+# branded, and versioned differently" scenario from the brief (Section 1).
+# Selected via the TENANT env var so the identical app.py can serve as two
+# distinct-looking "tenants" without duplicating any business logic --
+# duplicating the app would risk the two tenants silently drifting in
+# behavior, which defeats the point of a same-vendor-product stand-in.
+TENANT = __import__("os").environ.get("TENANT", "base")
+
+TENANT_CONFIG = {
+    "base": {
+        "console_name": "CU-SERV Core Banking Console",
+        "savings_label": "Savings Balance",
+        "savings_field_id": "fld_savings_balance",
+        "search_button_label": "Look Up Member",
+    },
+    "northwind": {
+        # A second tenant on the "same vendor product": different branding,
+        # different field label wording, and a different element id for the
+        # balance field -- realistic vendor-config drift (a rename during a
+        # tenant's onboarding, a different template variant) that would break
+        # a locator keyed only on exact text or exact id.
+        "console_name": "Northwind Credit Union Teller Console",
+        "savings_label": "Available Savings",
+        "savings_field_id": "sav_bal_field",
+        "search_button_label": "Search Member Account",
+    },
+}
+CFG = TENANT_CONFIG.get(TENANT, TENANT_CONFIG["base"])
+
+# ---------------------------------------------------------------------------
 # In-memory "core banking" data. Reset on process restart -- this is a mock.
 # ---------------------------------------------------------------------------
 MEMBERS = {
@@ -99,7 +133,7 @@ def layout(title, body, frame=None):
 </style>
 </head>
 <body>
-<div class="hdr">CU-SERV Core Banking Console (TEST) &mdash; {title}</div>
+<div class="hdr">{CFG['console_name']} (TEST) &mdash; {title}</div>
 <table class="layout"><tr><td style="padding:10px;">
 {body}
 </td></tr></table>
@@ -194,13 +228,13 @@ def search():
 
 
 def _search_form():
-    return """
+    return f"""
     <p>Enter a Member ID to look up their account.</p>
     <form method="post" action="/search">
     <table class="data">
       <tr><td>Member ID</td><td><input type="text" name="member_id" id="fld_memberid"></td></tr>
     </table><br>
-    <input class="btn" type="submit" name="do_search" value="Look Up Member">
+    <input class="btn" type="submit" name="do_search" value="{CFG['search_button_label']}">
     </form>
     """
 
@@ -232,7 +266,7 @@ def member_detail(member_id):
       <tr><td>Member ID</td><td>{member['id']}</td></tr>
       <tr><td>Name</td><td>{member['name']}</td></tr>
       <tr><td>Status</td><td>{member['status']}</td></tr>
-      <tr><td>Savings Balance</td><td id="fld_savings_balance">${member['savings_balance']:.2f}</td></tr>
+      <tr><td>{CFG['savings_label']}</td><td id="{CFG['savings_field_id']}">${member['savings_balance']:.2f}</td></tr>
       <tr><td>Checking Balance</td><td id="fld_checking_balance">${member['checking_balance']:.2f}</td></tr>
     </table>
     <br>
@@ -339,4 +373,10 @@ def expire_session():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5055, debug=False)
+    # PORT env var lets the same app.py run as two "tenants" at once (base on
+    # 5055, northwind on 5056) so a tenant-override replay can be demonstrated
+    # against two genuinely live, independently-running instances rather than
+    # a single shared process pretending to be two tenants.
+    port = int(__import__("os").environ.get("PORT", "5055"))
+    print(f"Starting mock bank as tenant '{TENANT}' on port {port} (savings label: '{CFG['savings_label']}', field id: '{CFG['savings_field_id']}')")
+    app.run(host="127.0.0.1", port=port, debug=False)

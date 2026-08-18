@@ -102,6 +102,67 @@ def resolve_target(page: Page, target: TargetElement, timeout_ms: int = 8000) ->
     )
 
 
+def _select_option_smart(loc: PWLocator, requested_value: str, timeout_ms: int) -> str:
+    """
+    Select an <option> by matching `requested_value` against the actual option
+    values/labels present on the page, instead of trusting the caller's exact
+    casing or format.
+
+    Playwright's select_option(str) matches by the option's `value` attribute
+    ONLY -- it is not a fuzzy or label-aware match. An LLM proposing a value
+    like "Youth Savings" when the real HTML is <option value="YOUTH_SAVINGS">
+    will silently fail to match, or in some cases hang waiting for an option
+    that will never appear. This caused a real bug: five near-duplicate SELECT
+    steps were recorded into a single discovery artifact because the model
+    kept guessing different casings/formats for the same intended selection,
+    and one guess ("youth_savings", lowercase) timed out entirely without
+    halting the run. See REPORT.md, "Cuts" / bug log.
+
+    Match order:
+      1. exact value match (value="...")
+      2. exact label match (case-insensitive)
+      3. normalized match (strip whitespace/case/underscores/hyphens) on
+         either value or label
+
+    Returns the actual `value` attribute that was selected. Raises ValueError
+    with the real available options listed if nothing matches, so callers see
+    what's actually on the page instead of a bare timeout.
+    """
+    options = loc.evaluate(
+        "el => Array.from(el.options).map(o => ({value: o.value, label: o.label.trim()}))"
+    )
+    if not options:
+        raise ValueError("select element has no <option> children")
+
+    def normalize(s: str) -> str:
+        return s.strip().lower().replace("_", "").replace(" ", "").replace("-", "")
+
+    target_norm = normalize(requested_value)
+
+    # 1) exact value match
+    for opt in options:
+        if opt["value"] == requested_value:
+            loc.select_option(value=opt["value"], timeout=timeout_ms)
+            return opt["value"]
+
+    # 2) exact label match (case-insensitive)
+    for opt in options:
+        if opt["label"].lower() == requested_value.strip().lower():
+            loc.select_option(value=opt["value"], timeout=timeout_ms)
+            return opt["value"]
+
+    # 3) normalized match on either value or label
+    for opt in options:
+        if normalize(opt["value"]) == target_norm or normalize(opt["label"]) == target_norm:
+            loc.select_option(value=opt["value"], timeout=timeout_ms)
+            return opt["value"]
+
+    available = ", ".join(f"value={o['value']!r} label={o['label']!r}" for o in options)
+    raise ValueError(
+        f"No option matching {requested_value!r} found. Available options: {available}"
+    )
+
+
 def check_checkpoint(page: Page, cp: Checkpoint) -> tuple[bool, str]:
     try:
         if cp.type == CheckpointType.URL_MATCHES:
@@ -212,8 +273,11 @@ class ActionExecutor:
 
             elif action.type == ActionType.SELECT:
                 loc, strategy_used = resolve_target(self.page, action.target, action.timeout_ms)
-                loc.select_option(resolved_value, timeout=action.timeout_ms)
-                self._record(step_index, "select", description, strategy_used, True, f"selected {resolved_value}")
+                actual_value = _select_option_smart(loc, resolved_value or "", action.timeout_ms)
+                self._record(
+                    step_index, "select", description, strategy_used, True,
+                    f"selected {actual_value} (requested: {resolved_value!r})",
+                )
 
             elif action.type == ActionType.WAIT_FOR:
                 loc, strategy_used = resolve_target(self.page, action.target, action.timeout_ms)

@@ -1,0 +1,56 @@
+{
+  "tenant_id": "northwind",
+  "base_artifact_id": "38dc7c06-71a4-4f2a-8dcb-be6cb68dc4d3",
+  "base_artifact_name": "get_member_savings_balance",
+  "entry_point_override": "http://127.0.0.1:5056/search",
+  "locator_overrides": [
+    {
+      "step_index": 2,
+      "target": {
+        "primary": {
+          "strategy": "aria_role_name",
+          "value": "button::Search Member Account",
+          "frame": "main",
+          "description": "'Search Member Account' (button) -- Northwind's relabeled submit button"
+        },
+        "fallbacks": [
+          {
+            "strategy": "css_selector",
+            "value": "input[name=\"do_search\"]",
+            "frame": "main",
+            "description": "structural fallback, same form field name across tenants"
+          }
+        ],
+        "robustness_note": "Northwind renames the button caption but keeps the underlying form field name (do_search) the same -- the CSS fallback survives even if the tenant relabels again."
+      }
+    },
+    {
+      "step_index": 3,
+      "target": {
+        "primary": {
+          "strategy": "aria_role_name",
+          "value": "text::Available Savings",
+          "frame": "main",
+          "description": "'Available Savings' (text) -- Northwind's relabeled balance field"
+        },
+        "fallbacks": [
+          {
+            "strategy": "element_id",
+            "value": "sav_bal_field",
+            "frame": "main",
+            "description": "by id fallback for Northwind balance field"
+          }
+        ],
+        "robustness_note": "Northwind uses 'Available Savings' as the label and 'sav_bal_field' as the element id, both different from base -- override captures both so either surviving a future relabel still resolves."
+      }
+    }
+  ],
+  "checkpoint_overrides": [
+    {
+      "step_index": null,
+      "expectation": "Available Savings"
+    }
+  ],
+  "created_at": "2026-08-17T04:51:08.823481+00:00",
+  "notes": "Northwind Credit Union runs the same underlying vendor product as the base tenant, but their onboarding customized the savings-balance field label to 'Available Savings' and the search button caption to 'Search Member Account'. Business logic, step order, and risk classification are all unchanged from base -- only presentation differs."
+}

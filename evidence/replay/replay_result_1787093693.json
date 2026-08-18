@@ -1,0 +1,13 @@
+{
+  "status": "business_outcome",
+  "artifact_id": "manual-test-1",
+  "artifact_version": "1.0.0",
+  "outputs": {},
+  "outcome_name": "MEMBER_NOT_FOUND",
+  "failed_step_index": 2,
+  "error_detail": null,
+  "escalation_id": null,
+  "started_at": "2026-08-18T22:54:53.438215+00:00",
+  "finished_at": "2026-08-18T22:54:53.603846+00:00",
+  "evidence_dir": null
+}
